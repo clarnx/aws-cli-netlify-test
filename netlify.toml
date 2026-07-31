@@ -1,0 +1,21 @@
+[build]
+  publish = "dist"
+
+  # DEPLOY 1: the current build command, same shape as the failing build.
+  # Expected: "aws: command not found", then the build carries on anyway because
+  # `export VAR=$(...)` reports success even when the command inside fails, and the
+  # step that needs the token fails afterwards.
+  command = '''
+echo "=== which aws ==="
+command -v aws || echo "aws is NOT installed in the build image"
+
+if [ -n "$NPM_AWS_KEY" ]; then
+  export AWS_ACCESS_KEY_ID="$NPM_AWS_KEY"
+  export AWS_SECRET_ACCESS_KEY="$NPM_AWS_SECRET"
+  export AWS_DEFAULT_REGION=us-east-1
+  export NPM_AWS_AUTH=$(aws codeartifact get-authorization-token --domain example-domain --domain-owner 111122223333 --region us-east-1 --query authorizationToken --output text)
+fi
+
+echo "=== exit status of that block was $? (success, despite the error above) ==="
+node check-codeartifact.mjs && npm run build
+'''
