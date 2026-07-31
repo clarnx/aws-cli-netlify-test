@@ -1,28 +1,29 @@
 [build]
   publish = "dist"
 
-  # DEPLOY 3: the customer's CURRENT command (AWS SDK version), kept verbatim except
-  # the trailing pnpm steps, which are stood in for by check-codeartifact.mjs.
-  # Expected: the SDK reports the credential error, the shell ignores it, and the build
-  # walks on into the dependency step before failing there.
+  # DEPLOY B: the UPDATED command. Same SDK approach as the customer already uses, with
+  # the error handling fixed: set -euo pipefail, npm install errors no longer swallowed,
+  # token assigned then exported separately, and an emptiness check.
   #
-  # Note: nothing may follow the final command, or its exit code gets masked. That is the
-  # same trap the customer's command falls into.
+  # With placeholder credentials this deploy is EXPECTED to fail, and to fail at the token
+  # step rather than limping on to the dependency install. That is the fix working.
   command = '''
+set -euo pipefail
 echo "MARKER 1: start"
 rm -rf dist
 
-if [ -n "$NPM_AWS_KEY" ]; then
+if [ -n "${NPM_AWS_KEY:-}" ]; then
   export AWS_ACCESS_KEY_ID="$NPM_AWS_KEY"
   export AWS_SECRET_ACCESS_KEY="$NPM_AWS_SECRET"
   export AWS_DEFAULT_REGION=us-east-1
   AUTH_DIR=$(mktemp -d)
-  npm install --prefix "$AUTH_DIR" --silent @aws-sdk/client-codeartifact >/dev/null 2>&1
-  export NPM_AWS_AUTH=$(NODE_PATH="$AUTH_DIR/node_modules" node -e 'const { CodeartifactClient, GetAuthorizationTokenCommand } = require("@aws-sdk/client-codeartifact"); (async () => { const client = new CodeartifactClient({ region: "us-east-1" }); const out = await client.send(new GetAuthorizationTokenCommand({ domain: "example-domain", domainOwner: "111122223333" })); if (!out.authorizationToken) throw new Error("empty CodeArtifact token"); process.stdout.write(out.authorizationToken); })().catch((e) => { console.error(e); process.exit(1); });')
+  npm install --prefix "$AUTH_DIR" --silent @aws-sdk/client-codeartifact@3
+  NPM_AWS_AUTH="$(NODE_PATH="$AUTH_DIR/node_modules" node -e 'const { CodeartifactClient, GetAuthorizationTokenCommand } = require("@aws-sdk/client-codeartifact"); (async () => { const client = new CodeartifactClient({ region: "us-east-1" }); const out = await client.send(new GetAuthorizationTokenCommand({ domain: "example-domain", domainOwner: "111122223333" })); if (!out.authorizationToken) throw new Error("empty CodeArtifact token"); process.stdout.write(out.authorizationToken); })().catch((e) => { console.error(e); process.exit(1); });')"
+  export NPM_AWS_AUTH
+  [ -n "$NPM_AWS_AUTH" ] || { echo "CodeArtifact token fetch returned empty"; exit 1; }
   echo "NPM_AWS_AUTH length=${#NPM_AWS_AUTH}"
 fi
 
-echo "MARKER 2: got past the token block and is still running"
-echo "MARKER 3: now the dependency step that needs the token"
+echo "MARKER 2: reached the dependency step (should NOT appear on a token failure)"
 node check-codeartifact.mjs && npm run build
 '''
