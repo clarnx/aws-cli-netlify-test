@@ -1,60 +1,28 @@
 [build]
   publish = "dist"
 
-  # DEPLOY 2: the updated build command.
-  # Part 1 records the state the old command ran into, part 2 applies the fix.
+  # DEPLOY 3: the customer's CURRENT command (AWS SDK version), kept verbatim except
+  # the trailing pnpm steps, which are stood in for by check-codeartifact.mjs.
+  # Expected: the SDK reports the credential error, the shell ignores it, and the build
+  # walks on into the dependency step before failing there.
+  #
+  # Note: nothing may follow the final command, or its exit code gets masked. That is the
+  # same trap the customer's command falls into.
   command = '''
-set -euo pipefail
-mkdir -p .evidence
+echo "MARKER 1: start"
+rm -rf dist
 
-# ---------- part 1: show what the old command was up against ----------
-command -v aws > .evidence/before.txt 2>&1 || echo "aws: NOT FOUND in the build image" > .evidence/before.txt
-cat .evidence/before.txt
-
-# No "|| true" below on purpose. "export VAR=$(failing command)" returns success by
-# itself, which is exactly the behaviour that let the original build carry on.
-export NPM_AWS_AUTH_OLD=$(aws codeartifact get-authorization-token --domain example-domain --domain-owner 111122223333 --region us-east-1 --query authorizationToken --output text 2>/dev/null)
-rc=$?
-{
-  echo "the shell reported exit status $rc for that export line, i.e. success"
-  echo "token length actually captured: ${#NPM_AWS_AUTH_OLD}"
-  echo "so the old build continued with an empty token and failed later with a 401"
-} > .evidence/old-behaviour.txt
-cat .evidence/old-behaviour.txt
-
-# ---------- part 2: the fix ----------
-if [ -n "${NPM_AWS_KEY:-}" ]; then
+if [ -n "$NPM_AWS_KEY" ]; then
   export AWS_ACCESS_KEY_ID="$NPM_AWS_KEY"
   export AWS_SECRET_ACCESS_KEY="$NPM_AWS_SECRET"
   export AWS_DEFAULT_REGION=us-east-1
-
-  mise use -g aws-cli@2.36.13
-
-  command -v aws > .evidence/after.txt 2>&1
-  cat .evidence/after.txt
-  aws --version > .evidence/version.txt 2>&1
-  cat .evidence/version.txt
-
-  # Assign first, export second, so a real failure stops the build.
-  if NPM_AWS_AUTH="$(aws codeartifact get-authorization-token --domain example-domain --domain-owner 111122223333 --region us-east-1 --query authorizationToken --output text 2>.evidence/token.txt)"; then
-    export NPM_AWS_AUTH
-    echo "got a token, length ${#NPM_AWS_AUTH}" >> .evidence/token.txt
-    [ -n "$NPM_AWS_AUTH" ] || { echo "CodeArtifact token fetch returned empty"; exit 1; }
-  else
-    cat .evidence/token.txt
-    if grep -qE 'UnrecognizedClient|InvalidSignature|AccessDenied|security token|InvalidClientTokenId' .evidence/token.txt; then
-      {
-        echo ""
-        echo "EXPECTED HERE: AWS rejected the placeholder credentials."
-        echo "The aws CLI ran and reached CodeArtifact, which is what this test verifies."
-        echo "With real credentials this call returns a token instead."
-      } >> .evidence/token.txt
-    else
-      echo "UNEXPECTED: aws did not reach AWS at all"
-      exit 1
-    fi
-  fi
+  AUTH_DIR=$(mktemp -d)
+  npm install --prefix "$AUTH_DIR" --silent @aws-sdk/client-codeartifact >/dev/null 2>&1
+  export NPM_AWS_AUTH=$(NODE_PATH="$AUTH_DIR/node_modules" node -e 'const { CodeartifactClient, GetAuthorizationTokenCommand } = require("@aws-sdk/client-codeartifact"); (async () => { const client = new CodeartifactClient({ region: "us-east-1" }); const out = await client.send(new GetAuthorizationTokenCommand({ domain: "example-domain", domainOwner: "111122223333" })); if (!out.authorizationToken) throw new Error("empty CodeArtifact token"); process.stdout.write(out.authorizationToken); })().catch((e) => { console.error(e); process.exit(1); });')
+  echo "NPM_AWS_AUTH length=${#NPM_AWS_AUTH}"
 fi
 
-npm run build
+echo "MARKER 2: got past the token block and is still running"
+echo "MARKER 3: now the dependency step that needs the token"
+node check-codeartifact.mjs && npm run build
 '''
